@@ -26,12 +26,15 @@ results = retrieve(
     k=5,
 )
 
-for i, doc in enumerate(results):
-    print(f"\n===== RESULT {i + 1} =====")
-    print(doc.page_content)
-    print("\nMETADATA:")
-    print(doc.metadata)
+for i, (doc, score) in enumerate(results):
 
+    print(f"\n===== RESULT {i + 1} =====")
+    print(f"Score: {score}")
+    print(f"Chunk ID: {doc.metadata.get('chunk_id')}")
+    print(f"Source: {doc.metadata.get('source')}")
+
+    print("\nCONTENT:")
+    print(doc.page_content)
 
 print("\n========== MMR SEARCH ==========")
 
