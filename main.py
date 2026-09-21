@@ -2,6 +2,7 @@ from app.ingestion import  load_markdown,load_pdf
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.llm import get_embeddings
 from dotenv import load_dotenv
+from langchain_chroma import Chroma
 load_dotenv()
 import numpy as np
 from app.vector_store import create_vector_store

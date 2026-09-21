@@ -2,8 +2,8 @@ from langchain_chroma import Chroma
 
 from app.llm import get_embeddings
 from app.retrieval import retrieve, retrieve_with_mmr
-
-
+from app.pipeline import answer_question
+from app.verifier import  verify_claims
 VECTOR_DB_PATH = "./data/chroma"
 
 
@@ -49,3 +49,25 @@ for i, doc in enumerate(results_mmr):
     print(doc.page_content)
     print("\nMETADATA:")
     print(doc.metadata)
+    
+
+context_parts = []
+for doc, score in results:
+        chunk_id = doc.metadata.get("chunk_id", "unknown")
+        source = doc.metadata.get("source", "unknown")
+
+        context_parts.append(
+            f"Chunk ID: {chunk_id}\n"
+            f"Source: {source}\n"
+            f"Content: {doc.page_content}\n"
+        )
+
+context = "\n".join(context_parts)
+    
+answer = answer_question(query)
+print(f"\n===== ANSWER =====")
+print(answer)
+
+verification = verify_claims(query, answer, context)
+print(f"\n===== VERIFICATION =====")
+print(verification)

@@ -2,7 +2,8 @@ from app.ingestion import load_markdown, split_documents
 from app.vector_store import create_vector_store
 
 
-SOURCE = "data/documents/rag_notes.md"
+
+SOURCE = "data/documents/nexora_company_overview.md"
 
 documents = load_markdown(SOURCE)
 
