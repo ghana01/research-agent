@@ -3,8 +3,30 @@ from langchain_core.prompts import PromptTemplate
 from app.llm import get_llm
 
 
-def generate_answer(question, context):
+def _extract_usage_metadata(response):
+    if response is None:
+        return {}
 
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        return usage
+
+    metadata = getattr(response, "response_metadata", None) or {}
+    if isinstance(metadata, dict):
+        for key in ("usage", "token_usage", "usage_metadata"):
+            value = metadata.get(key)
+            if isinstance(value, dict):
+                return value
+
+    return {}
+
+
+def generate_answer(question, context):
+    answer, _ = generate_answer_with_usage(question, context)
+    return answer
+
+
+def generate_answer_with_usage(question, context):
     prompt_template = PromptTemplate(
         input_variables=["context", "question"],
         template="""
@@ -38,5 +60,5 @@ Answer:
     )
 
     response = get_llm().invoke(prompt)
-
-    return response.content
+    usage = _extract_usage_metadata(response)
+    return response.content, usage

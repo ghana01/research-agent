@@ -1,5 +1,5 @@
 from app.pipeline import run_question
-
+from app.tracing import Trace
 
 def main():
     question = input("\nEnter your question: ").strip()
@@ -15,6 +15,9 @@ def main():
 
     print("\nAnswer:")
     print(result["answer"])
+
+    if "trace" in result:
+        result["trace"].print_trace()
 
 
 if __name__ == "__main__":

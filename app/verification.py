@@ -6,6 +6,24 @@ from langchain_core.prompts import PromptTemplate
 from app.llm import get_llm
 
 
+def _extract_usage_metadata(response):
+    if response is None:
+        return {}
+
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        return usage
+
+    metadata = getattr(response, "response_metadata", None) or {}
+    if isinstance(metadata, dict):
+        for key in ("usage", "token_usage", "usage_metadata"):
+            value = metadata.get(key)
+            if isinstance(value, dict):
+                return value
+
+    return {}
+
+
 class ClaimVerification(BaseModel):
     claim: str
     verdict: Literal[
@@ -22,9 +40,14 @@ class VerificationResult(BaseModel):
 
 
 def verify_answer(question, answer, context):
+    result, _ = verify_answer_with_usage(question, answer, context)
+    return result
 
+
+def verify_answer_with_usage(question, answer, context):
     llm = get_llm().with_structured_output(
-        VerificationResult
+        VerificationResult,
+        include_raw=True
     )
 
     prompt_template = PromptTemplate(
@@ -77,9 +100,11 @@ Important: use only chunk IDs that appear in the context.
         answer=answer
     )
 
-    result = llm.invoke(prompt)
-
-    return result
+    response = llm.invoke(prompt)
+    result = response["parsed"]
+    raw_response = response["raw"]
+    usage = _extract_usage_metadata(raw_response)
+    return result, usage
 
 
 def decide_result(verification_result):

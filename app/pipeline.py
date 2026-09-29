@@ -3,8 +3,19 @@ from app.retrieval import retrieve
 from app.llm import get_embeddings, get_llm
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
-from app.generation import generate_answer
-from app.verification import verify_answer, decide_result
+from app.generation import generate_answer_with_usage
+from app.verification import verify_answer_with_usage, decide_result
+from app.tracing import Trace
+
+
+def _apply_usage_metadata(span, usage):
+    if not usage:
+        return
+
+    usage_dict = usage if isinstance(usage, dict) else {}
+    span.metadata["input_tokens"] = usage_dict.get("input_tokens", usage_dict.get("prompt_tokens", 0))
+    span.metadata["output_tokens"] = usage_dict.get("output_tokens", usage_dict.get("completion_tokens", 0))
+    span.metadata["total_tokens"] = usage_dict.get("total_tokens", usage_dict.get("input_tokens", 0) + usage_dict.get("output_tokens", 0))
 
 
 def build_context_from_results(results) -> str:
@@ -103,28 +114,76 @@ Corrected Answer:
 
 
 def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
+    trace = Trace()
+
+    retrieval_span = trace.start_span(
+        "retrieval",
+        metadata={
+            "k": k,
+        },
+    )
     vector_store = Chroma(
         persist_directory=VECTOR_DB_PATH,
         embedding_function=get_embeddings(),
     )
     results = retrieve(vector_store, question, k=k)
+    retrieval_span.metadata["chunks_retrieved"] = len(results)
+    retrieval_span.end()
+
     context = build_context_from_results(results)
-    return run_rag_pipeline(question=question, context=context, max_attempts=max_attempts)
+    result = run_rag_pipeline(question=question, context=context, max_attempts=max_attempts, trace=trace)
+    result["trace"] = trace
+    return result
 
 
 def run_rag_pipeline(
     question,
     context,
-    max_attempts=2
+    max_attempts=2,
+    trace=None
 ):
-    answer = generate_answer(question, context)
+    if trace is None:
+        trace = Trace()
+
+    answer = None
+    verification_result = None
 
     for attempt in range(max_attempts):
+        generation_span = trace.start_span(
+            "generation",
+            metadata={
+                "model": "gpt-4o",
+                "attempt": attempt + 1,
+            },
+        )
+        answer, generation_usage = generate_answer_with_usage(question, context)
+        _apply_usage_metadata(generation_span, generation_usage)
+        generation_span.end()
+
         print(f"\n===== ATTEMPT {attempt + 1} =====")
         print("\nANSWER:")
         print(answer)
 
-        verification_result = verify_answer(question, answer, context)
+        verification_span = trace.start_span(
+            "verification",
+            metadata={
+                "model": "gpt-4o",
+                "attempt": attempt + 1,
+            },
+        )
+        verification_result, verification_usage = verify_answer_with_usage(question, answer, context)
+        _apply_usage_metadata(verification_span, verification_usage)
+        verification_span.metadata["claims"] = len(verification_result.claims)
+        verification_span.metadata["supported"] = sum(
+            1 for claim in verification_result.claims if claim.verdict == "SUPPORTED"
+        )
+        verification_span.metadata["unsupported"] = sum(
+            1 for claim in verification_result.claims if claim.verdict == "UNSUPPORTED"
+        )
+        verification_span.metadata["partially_supported"] = sum(
+            1 for claim in verification_result.claims if claim.verdict == "PARTIALLY_SUPPORTED"
+        )
+        verification_span.end()
 
         print("\nVERIFICATION:")
         for claim in verification_result.claims:
@@ -136,17 +195,41 @@ def run_rag_pipeline(
         decision = decide_result(verification_result)
         print(f"\nDECISION: {decision}")
 
-        if decision == "ACCEPT" or attempt == max_attempts - 1:
+        if decision == "ACCEPT":
             return {
                 "answer": answer,
                 "decision": decision,
-                "verification": verification_result
+                "verification": verification_result,
+                "trace": trace,
+            }
+
+        if attempt == max_attempts - 1:
+            return {
+                "answer": answer,
+                "decision": decision,
+                "verification": verification_result,
+                "trace": trace,
             }
 
         print("\nRegenerating answer...")
+        regeneration_span = trace.start_span(
+            "regeneration",
+            metadata={
+                "attempt": attempt + 1,
+                "previous_decision": decision,
+            },
+        )
         answer = regenerate_answer(
             question,
             context,
             answer,
             verification_result
         )
+        regeneration_span.end()
+
+    return {
+        "answer": answer,
+        "decision": decide_result(verification_result),
+        "verification": verification_result,
+        "trace": trace,
+    }
