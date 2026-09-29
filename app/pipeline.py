@@ -81,6 +81,8 @@ Rules:
 4. Do not add information from your own knowledge.
 5. If the context does not contain enough information,
    explicitly say that there is not enough information.
+6. Cite each important factual claim with the relevant chunk ID in this format: [chunk: CHUNK_ID]
+7. Only use chunk IDs that appear in the context.
 
 Corrected Answer:
 """
@@ -129,6 +131,7 @@ def run_rag_pipeline(
             print(f"\nClaim: {claim.claim}")
             print(f"Verdict: {claim.verdict}")
             print(f"Reason: {claim.reason}")
+            print(f"Evidence chunk: {claim.evidence_chunk_id}")
 
         decision = decide_result(verification_result)
         print(f"\nDECISION: {decision}")

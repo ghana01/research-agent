@@ -14,6 +14,7 @@ class ClaimVerification(BaseModel):
         "UNSUPPORTED"
     ]
     reason: str
+    evidence_chunk_id: str | None = None
 
 
 class VerificationResult(BaseModel):
@@ -60,7 +61,13 @@ The context supports only part of the claim.
 UNSUPPORTED:
 The context does not support the claim.
 
-Provide a reason for every verdict.
+Return each claim with:
+- claim
+- SUPPORTED / PARTIALLY_SUPPORTED / UNSUPPORTED
+- reason
+- evidence_chunk_id: the most relevant chunk ID from the context that supports or refutes the claim. If no chunk clearly supports it, use null.
+
+Important: use only chunk IDs that appear in the context.
 """
     )
 
