@@ -1,7 +1,7 @@
 from langchain_core.prompts import PromptTemplate
 
 from app.llm import get_llm
-
+from langsmith import traceable
 
 def _extract_usage_metadata(response):
     if response is None:
@@ -25,7 +25,7 @@ def generate_answer(question, context):
     answer, _ = generate_answer_with_usage(question, context)
     return answer
 
-
+@traceable(name="generation", run_type="chain")
 def generate_answer_with_usage(question, context):
     prompt_template = PromptTemplate(
         input_variables=["context", "question"],

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from langchain_core.prompts import PromptTemplate
 
 from app.llm import get_llm
-
+from langsmith import traceable
 
 def _extract_usage_metadata(response):
     if response is None:
@@ -43,7 +43,7 @@ def verify_answer(question, answer, context):
     result, _ = verify_answer_with_usage(question, answer, context)
     return result
 
-
+@traceable(name="verification", run_type="chain")
 def verify_answer_with_usage(question, answer, context):
     llm = get_llm().with_structured_output(
         VerificationResult,

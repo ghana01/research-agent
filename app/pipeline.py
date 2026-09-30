@@ -6,7 +6,7 @@ from langchain_core.prompts import PromptTemplate
 from app.generation import generate_answer_with_usage
 from app.verification import verify_answer_with_usage, decide_result
 from app.tracing import Trace
-
+from langsmith import traceable
 
 def _apply_usage_metadata(span, usage):
     if not usage:
@@ -42,7 +42,7 @@ def answer_question(question: str, k: int = 5) -> str:
     context = build_context_from_results(results)
     return generate_answer(question, context)
 
-
+@traceable(name="regeneration", run_type="chain")
 def regenerate_answer(
     question,
     context,
@@ -112,7 +112,7 @@ Corrected Answer:
 
 
 
-
+@traceable(name="rag_pipeline", run_type="chain")
 def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
     trace = Trace()
 
