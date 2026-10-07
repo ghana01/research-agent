@@ -6,6 +6,9 @@ from langchain_core.prompts import PromptTemplate
 from app.generation import generate_answer_with_usage
 from app.verification import verify_answer_with_usage, decide_result
 from app.tracing import Trace
+from app.query_transform import transform_query
+from app.reranker import rerank
+from app.hybrid_retrieval import create_bm25_retriever, hybrid_retrieve
 from langsmith import traceable
 
 def _apply_usage_metadata(span, usage):
@@ -126,11 +129,32 @@ def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
         persist_directory=VECTOR_DB_PATH,
         embedding_function=get_embeddings(),
     )
-    results = retrieve(vector_store, question, k=k)
+    bm25 = create_bm25_retriever()
+    transformed_query = transform_query(question)
+    print("\n========== QUERY TRANSFORMATION ==========")
+    print(f"Original:    {question}")
+    print(f"Transformed: {transformed_query}")
+
+    results = hybrid_retrieve(
+        vector_store,
+        bm25,
+        transformed_query,
+        k=k,
+    )
+    reranked_results = rerank(
+        question,
+        results,
+        top_n=3,
+    )
     retrieval_span.metadata["chunks_retrieved"] = len(results)
     retrieval_span.end()
 
-    context = build_context_from_results(results)
+    context = build_context_from_results(
+        [
+            (doc, score)
+            for doc, score in reranked_results
+        ]
+    )
     result = run_rag_pipeline(question=question, context=context, max_attempts=max_attempts, trace=trace)
     result["trace"] = trace
     return result
@@ -156,13 +180,27 @@ def run_rag_pipeline(
                 "attempt": attempt + 1,
             },
         )
-        answer, generation_usage = generate_answer_with_usage(question, context)
+        generation_result, generation_usage = generate_answer_with_usage(question, context)
+        answer = generation_result.answer
+        answer_status = generation_result.answer_status
+        generation_span.metadata["answer_status"] = answer_status
         _apply_usage_metadata(generation_span, generation_usage)
         generation_span.end()
 
         print(f"\n===== ATTEMPT {attempt + 1} =====")
         print("\nANSWER:")
         print(answer)
+
+        if answer_status == "ABSTAINED":
+            decision = "ACCEPT"
+            print(f"\nDECISION: {decision}")
+            return {
+                "answer": answer,
+                "answer_status": answer_status,
+                "decision": decision,
+                "verification": None,
+                "trace": trace,
+            }
 
         verification_span = trace.start_span(
             "verification",
@@ -198,6 +236,7 @@ def run_rag_pipeline(
         if decision == "ACCEPT":
             return {
                 "answer": answer,
+                "answer_status": answer_status,
                 "decision": decision,
                 "verification": verification_result,
                 "trace": trace,
@@ -206,6 +245,7 @@ def run_rag_pipeline(
         if attempt == max_attempts - 1:
             return {
                 "answer": answer,
+                "answer_status": answer_status,
                 "decision": decision,
                 "verification": verification_result,
                 "trace": trace,
