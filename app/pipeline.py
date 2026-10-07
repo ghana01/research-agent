@@ -13,6 +13,11 @@ from app.reranker import rerank
 from app.hybrid_retrieval import create_bm25_retriever, hybrid_retrieve
 from langsmith import traceable
 
+
+RETRIEVAL_K = 5
+CONTEXT_TOP_N = 3
+
+
 def _apply_usage_metadata(span, usage):
     if not usage:
         return
@@ -38,7 +43,7 @@ def build_context_from_results(results) -> str:
     return "\n".join(context_parts)
 
 
-def answer_question(question: str, k: int = 5) -> str:
+def answer_question(question: str, k: int = RETRIEVAL_K) -> str:
     vector_store = Chroma(
         persist_directory=VECTOR_DB_PATH,
         embedding_function=get_embeddings(),
@@ -118,7 +123,7 @@ Corrected Answer:
 
 
 @traceable(name="rag_pipeline", run_type="chain")
-def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
+def run_question(question: str, k: int = RETRIEVAL_K, max_attempts: int = 2) -> dict:
     trace = Trace()
 
     retrieval_span = trace.start_span(
@@ -150,8 +155,16 @@ def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
     reranked_results = rerank(
         question,
         results,
-        top_n=3,
+        top_n=CONTEXT_TOP_N,
     )
+    print("\n========== FINAL RERANKED CONTEXT ==========")
+    for rank, (doc, score) in enumerate(reranked_results, start=1):
+        print(f"\nRank: {rank}")
+        print(f"Chunk: {doc.metadata.get('chunk_id')}")
+        print(f"Reranker score: {score:.4f}")
+        print("Content:")
+        print(doc.page_content)
+        print("-" * 80)
     retrieval_timings["reranking"] = time.perf_counter() - reranking_start
     retrieval_timings["total"] = time.perf_counter() - retrieval_start
     print("\n========== RETRIEVAL TIMING ==========")
