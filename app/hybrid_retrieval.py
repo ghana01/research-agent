@@ -1,3 +1,5 @@
+import time
+
 from langchain_community.retrievers import BM25Retriever
 
 from app.ingestion import load_markdown, split_documents
@@ -45,12 +47,18 @@ def hybrid_retrieve(
 	bm25,
 	question: str,
 	k: int = 5,
+	timings=None,
 ):
+	if timings is None:
+		timings = {}
+
+	start = time.perf_counter()
 	dense_results = retrieve(
 		vector_store,
 		question,
 		k=k,
 	)
+	timings["dense"] = time.perf_counter() - start
 
 	dense_documents = [
 		doc
@@ -62,19 +70,23 @@ def hybrid_retrieve(
 		for doc in dense_documents
 	]
 
+	start = time.perf_counter()
 	bm25_results = bm25.invoke(question)
+	timings["bm25"] = time.perf_counter() - start
 
 	bm25_ranking = [
 		doc.metadata["chunk_id"]
 		for doc in bm25_results
 	]
 
+	start = time.perf_counter()
 	fused_results = rrf_fusion(
 		[
 			dense_ranking,
 			bm25_ranking,
 		]
 	)[:k]
+	timings["rrf"] = time.perf_counter() - start
 
 	document_lookup = {}
 

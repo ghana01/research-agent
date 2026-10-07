@@ -1,23 +1,26 @@
 from app.pipeline import run_question
-from app.tracing import Trace
-
 def main():
-    question = input("\nEnter your question: ").strip()
-    if not question:
-        print("Please enter a question.")
-        return
+    while True:
+        question = input("\nEnter your question: ").strip()
 
-    result = run_question(question, k=5, max_attempts=2)
+        if question.lower() in {"exit", "quit"}:
+            break
 
-    print("\n========== FINAL RESULT ==========")
-    print("\nDecision:")
-    print(result["decision"])
+        if not question:
+            print("Please enter a question.")
+            continue
 
-    print("\nAnswer:")
-    print(result["answer"])
+        result = run_question(question, k=5, max_attempts=2)
 
-    if "trace" in result:
-        result["trace"].print_trace()
+        print("\n========== FINAL RESULT ==========")
+        print("\nDecision:")
+        print(result["decision"])
+
+        print("\nAnswer:")
+        print(result["answer"])
+
+        if "trace" in result:
+            result["trace"].print_trace()
 
 
 if __name__ == "__main__":

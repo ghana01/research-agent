@@ -1,3 +1,5 @@
+import time
+
 from app.vector_store import VECTOR_DB_PATH
 from app.retrieval import retrieve
 from app.llm import get_embeddings, get_llm
@@ -135,17 +137,29 @@ def run_question(question: str, k: int = 5, max_attempts: int = 2) -> dict:
     print(f"Original:    {question}")
     print(f"Transformed: {transformed_query}")
 
+    retrieval_start = time.perf_counter()
+    retrieval_timings = {}
     results = hybrid_retrieve(
         vector_store,
         bm25,
         transformed_query,
         k=k,
+        timings=retrieval_timings,
     )
+    reranking_start = time.perf_counter()
     reranked_results = rerank(
         question,
         results,
         top_n=3,
     )
+    retrieval_timings["reranking"] = time.perf_counter() - reranking_start
+    retrieval_timings["total"] = time.perf_counter() - retrieval_start
+    print("\n========== RETRIEVAL TIMING ==========")
+    print(f"Dense:       {retrieval_timings['dense'] * 1000:.1f} ms")
+    print(f"BM25:        {retrieval_timings['bm25'] * 1000:.1f} ms")
+    print(f"RRF:         {retrieval_timings['rrf'] * 1000:.1f} ms")
+    print(f"Reranking:   {retrieval_timings['reranking'] * 1000:.1f} ms")
+    print(f"Total:       {retrieval_timings['total'] * 1000:.1f} ms")
     retrieval_span.metadata["chunks_retrieved"] = len(results)
     retrieval_span.end()
 

@@ -1,3 +1,5 @@
+import time
+
 from sentence_transformers import CrossEncoder
 
 
@@ -10,7 +12,10 @@ def get_reranker():
     global _reranker
 
     if _reranker is None:
+        start = time.perf_counter()
         _reranker = CrossEncoder(RERANKER_MODEL)
+        elapsed = time.perf_counter() - start
+        print(f"CrossEncoder initialization: {elapsed:.3f} s")
 
     return _reranker
 
@@ -38,7 +43,10 @@ def rerank(question, results, top_n=None):
         for doc, _score in results
     ]
 
+    start = time.perf_counter()
     scores = reranker.predict(pairs)
+    elapsed = time.perf_counter() - start
+    print(f"CrossEncoder.predict(): {elapsed:.3f} s")
 
     reranked = list(
         zip(
