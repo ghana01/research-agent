@@ -1,264 +1,453 @@
 # Research Agent
 
-Research Agent is an experimental retrieval-augmented generation (RAG) system for answering questions from a small, local document collection. The project is intentionally being evolved in observable stages: first make retrieval and generation work, then measure the bottlenecks, then improve lifecycle and production behavior.
+Research Agent is an experimental retrieval-augmented generation (RAG) service
+for answering questions from a local document collection. It combines dense
+vector search, lexical search, reciprocal-rank fusion, neural reranking,
+structured answer generation, and claim-level verification.
 
-## What It Does
+The project currently uses the Nexora company-policy document as its primary
+BM25 source and includes additional Markdown/PDF ingestion utilities for
+experiments. It can be used through an interactive command-line client or as a
+FastAPI HTTP service.
 
-For a user question, the application:
+## Capabilities
 
-1. Rewrites the question into a retrieval-friendly query.
-2. Retrieves a broad candidate set with dense vector search and BM25 lexical search.
-3. Combines both rankings with Reciprocal Rank Fusion (RRF).
-4. Reranks the candidates with a CrossEncoder.
-5. Sends only the strongest evidence to the answer generator.
-6. Produces structured `ANSWERED` or `ABSTAINED` output.
-7. Verifies answered responses against the retrieved context.
-8. Regenerates rejected answers, up to the configured attempt limit.
-9. Records timing and pipeline spans for inspection.
+The current implementation provides:
 
-The current experiment uses Nexora company-policy documents, but the ingestion layer also contains Markdown and PDF loaders for future sources.
+- Markdown and PDF document loading.
+- Recursive document chunking with 1,500-character chunks and 250-character
+  overlap.
+- Stable chunk metadata:
+  - `document_id`
+  - `chunk_id`
+  - `source`
+  - `file_type`
+- Persistent Chroma vector storage.
+- OpenAI embeddings through `text-embedding-3-small` by default.
+- Dense similarity retrieval.
+- BM25 lexical retrieval.
+- Reciprocal Rank Fusion (RRF) of dense and lexical rankings.
+- CrossEncoder reranking with `BAAI/bge-reranker-base`.
+- LLM-based query transformation before retrieval.
+- Structured answer generation with `ANSWERED` and `ABSTAINED` states.
+- Chunk citations in generated answers.
+- Claim-level verification with `SUPPORTED`,
+  `PARTIALLY_SUPPORTED`, and `UNSUPPORTED` verdicts.
+- Automatic regeneration of rejected answers, up to the configured attempt
+  limit.
+- Explicit acceptance of intentional abstentions without verification.
+- Retrieval, generation, verification, and regeneration timing/trace spans.
+- Token-usage metadata when the provider response exposes it.
+- FastAPI health, readiness, and question-answering endpoints.
+- Request IDs returned through the `X-Request-ID` response header.
+- OpenAI-specific error mapping for timeout, rate-limit, connection, and
+  general provider failures.
+- Optional LangSmith tracing through the LangChain configuration.
 
-## Architecture
+## End-to-end flow
 
 ```mermaid
 flowchart TD
-    Q[User question] --> T[Query transformation]
-    T --> D[Dense retrieval\nChroma + OpenAI embeddings]
-    T --> B[Lexical retrieval\nBM25]
-    D --> RRF[Reciprocal Rank Fusion]
-    B --> RRF
-    RRF --> C[Candidate pool\nRETRIEVAL_K = 5]
-    C --> X[CrossEncoder reranking\nBAAI/bge-reranker-base]
-    X --> CTX[Final context\nCONTEXT_TOP_N = 3]
-    CTX --> G[Structured generation]
+    Q[User question] --> T[LLM query transformation]
+    T --> D[Dense retrieval from Chroma]
+    T --> B[BM25 lexical retrieval]
+    D --> F[Reciprocal Rank Fusion]
+    B --> F
+    F --> C[Candidate pool: k = 5]
+    C --> R[CrossEncoder reranking]
+    R --> CTX[Top context: 3 chunks]
+    CTX --> G[Structured answer generation]
     G --> S{answer_status}
-    S -->|ABSTAINED| A[Accept and stop]
+    S -->|ABSTAINED| A[Accept abstention]
     S -->|ANSWERED| V[Claim verification]
-    V --> DEC{Decision}
-    DEC -->|ACCEPT| END[Return answer]
-    DEC -->|WARN| END
-    DEC -->|REJECT| REGEN[Regenerate with feedback]
-    REGEN --> G
+    V --> D2{Decision}
+    D2 -->|ACCEPT| END[Return answer]
+    D2 -->|WARN| END
+    D2 -->|REJECT| RG[Regenerate with feedback]
+    RG --> G
 ```
 
-### Retrieval and ranking
+### Retrieval configuration
 
-Documents are loaded and split by `app/ingestion.py` using a recursive character splitter with a 1,500-character chunk size and 250-character overlap. Each chunk receives stable metadata:
-
-- `document_id`
-- `chunk_id`
-- `source`
-- `file_type`
-
-Dense retrieval uses the persisted Chroma store at `data/chroma` and `text-embedding-3-small`. BM25 is currently built from `data/documents/nexora_company_overview.md` inside the query path. `app/hybrid_retrieval.py` fuses dense and BM25 rankings using RRF with `k=60`.
-
-The pipeline deliberately separates candidate breadth from context size:
+The main pipeline currently uses:
 
 ```python
 RETRIEVAL_K = 5
 CONTEXT_TOP_N = 3
 ```
 
-`RETRIEVAL_K` controls how many candidates are gathered. `CONTEXT_TOP_N` controls how many reranked documents are passed to the LLM. A larger candidate pool gives the reranker more evidence to compare without unnecessarily expanding the generation context.
+`RETRIEVAL_K` controls the number of candidates returned by the hybrid
+retriever. `CONTEXT_TOP_N` controls how many reranked chunks are placed in the
+LLM context. This keeps the candidate pool broad enough for reranking while
+limiting the generation context.
 
-The reranker uses a cached `CrossEncoder`. The first query reports model initialization time separately from `CrossEncoder.predict()` time. Retrieval also reports dense, BM25, RRF, reranking, and total retrieval timings.
+RRF uses `k=60`. BM25 currently rebuilds its retriever from
+`data/documents/nexora_company_overview.md` during each question. The Chroma
+database is loaded from the configured vector-store path.
 
-### Generation and verification
+### Answer reliability
 
-`app/generation.py` defines this Pydantic output contract:
+`app/generation.py` asks the model to return a validated object containing:
 
 ```python
-class GenerationResult(BaseModel):
-    answer_status: Literal["ANSWERED", "ABSTAINED"]
-    answer: str
+{
+    "answer_status": "ANSWERED" | "ABSTAINED",
+    "answer": "..."
+}
 ```
 
-The generator is instructed to use only the supplied context and cite chunk IDs. If the evidence is insufficient, it must return `ABSTAINED`; the pipeline accepts that response immediately and does not send it through verification or regeneration.
+The generator must use only the supplied context and cite important factual
+claims using the format `[chunk: CHUNK_ID]`. If the context is insufficient, it
+must abstain instead of inventing an answer.
 
-For `ANSWERED` responses, `app/verification.py` extracts claims and classifies each one as:
+For an `ANSWERED` response, `app/verification.py` checks every important claim.
+The pipeline makes the following decisions:
 
-- `SUPPORTED`
-- `PARTIALLY_SUPPORTED`
-- `UNSUPPORTED`
+- `ACCEPT`: all claims are supported.
+- `WARN`: at least one claim is partially supported and none is unsupported.
+- `REJECT`: at least one claim is unsupported.
 
-The verifier remains independent of abstention handling. An unsupported claim still causes `REJECT`; the pipeline does not weaken verifier behavior to accommodate abstentions.
+Rejected answers are regenerated with verifier feedback until they are accepted
+or the maximum attempt count is reached. An intentional `ABSTAINED` response is
+accepted immediately.
 
-## Project Layout
+## HTTP API
+
+Start the service with:
+
+```powershell
+python -m uvicorn main:app --reload
+```
+
+The API is also available through the FastAPI application object in
+`main.py`.
+
+### `GET /`
+
+Basic service information:
+
+```json
+{
+  "message": "Research Agent API is running"
+}
+```
+
+### `GET /health/live`
+
+Liveness check. This confirms that the application process is responding:
+
+```json
+{
+  "status": "alive"
+}
+```
+
+### `GET /health/ready`
+
+Readiness check. It verifies that the configured vector-store directory exists.
+It returns HTTP 200 when ready and HTTP 503 when the vector store is not
+available:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+### `POST /ask`
+
+Request:
+
+```json
+{
+  "question": "What is Nexora's monthly meal allowance?"
+}
+```
+
+The `question` field must contain at least one character. Empty questions are
+rejected with HTTP 422.
+
+Successful responses contain:
+
+```json
+{
+  "answer": "...",
+  "answer_status": "ANSWERED",
+  "decision": "ACCEPT"
+}
+```
+
+The response also includes an `X-Request-ID` header. The request ID is added to
+request logs and passed as metadata to the LangSmith tracing context.
+
+### Error responses
+
+OpenAI provider errors are converted to stable HTTP responses:
+
+| Error | HTTP status | API detail |
+|---|---:|---|
+| API timeout | 504 | The AI service timed out. Please try again. |
+| Rate limit | 503 | The AI service is temporarily busy. Please try again. |
+| Connection failure | 503 | The AI service is temporarily unavailable. |
+| Other OpenAI error | 502 | The AI service could not complete the request. |
+| Unexpected application error | 500 | An unexpected error occurred while processing your request. |
+
+## Project structure
 
 ```text
 app/
-  config.py              Configuration placeholder
-  generation.py          Structured answer generation and abstention
-  hybrid_retrieval.py    BM25 retrieval and RRF fusion
-  ingestion.py           Markdown/PDF loading and chunk metadata
-  llm.py                 OpenAI embeddings and ChatOpenAI factories
-  pipeline.py            End-to-end orchestration
-  query_transform.py     Retrieval-query rewriting
-  reranker.py            CrossEncoder model and scoring
-  retrieval.py           Dense Chroma retrieval helpers
-  tracing.py              Lightweight local span tracing
-  vector_store.py        Chroma persistence configuration
-  verification.py        Claim schema, verification, and decisions
-  verifier.py             Additional verifier-related experiment code
+  api.py              FastAPI app, routes, middleware, and error handlers
+  config.py           Pydantic settings loaded from environment and .env
+  generation.py       Structured answer generation and usage extraction
+  hybrid_retrieval.py BM25 retrieval and RRF fusion
+  ingestion.py        Markdown/PDF loading and document chunking
+  llm.py              OpenAI chat and embedding factories
+  pipeline.py         Complete retrieval, generation, verification workflow
+  query_transform.py  LLM query rewriting for retrieval
+  reranker.py         Cached CrossEncoder and reranking
+  retrieval.py        Chroma similarity-search helpers
+  tracing.py          Lightweight local span tracing
+  vector_store.py     Chroma persistence and embedding configuration
+  verification.py     Claim schema, verification, and decision calculation
+  verifier.py         Additional verifier experiment code
 
 data/
-  chroma/                Persisted Chroma database
-  documents/             Source Markdown and PDF documents
+  chroma/             Persisted Chroma database
+  documents/          Markdown and PDF source documents
 
 scripts/
-  query.py               Interactive multi-question CLI
-  index_documents.py     Chunk and index the Nexora document
-  test_*.py              Focused retrieval, reranking, schema, and tracing experiments
-  evaluate_*.py          Evaluation and recall/quality experiments
-  run_evaluation.py      Evaluation runner
-  create_eval_dataset.py Evaluation dataset creation
+  index_documents.py                  Build/update the Chroma index
+  query.py                            Interactive query client
+  create_eval_dataset.py              Create evaluation data
+  evaluate_rag.py                     Evaluate the end-to-end RAG pipeline
+  evaluate_retrieval.py               Evaluate retrieval quality
+  evaluate_reranker.py                Evaluate reranking quality
+  run_evaluation.py                   Run evaluation queries
+  inspect_metadata.py                 Inspect indexed metadata
+  test_*.py                           Focused retrieval/model experiments
 
 tests/
-  retrieval_eval.py      Retrieval evaluation utilities
+  test_api.py          API behavior tests
+  test_config.py       Settings validation tests
+  retrieval_eval.py    Retrieval evaluation utilities
+
+main.py                Application entry point (`from app.api import app`)
+requirements.txt       Python dependencies
 ```
 
-## Setup
+## Requirements
 
-Create an environment and install the project dependencies:
+- Python 3.10 or newer is recommended.
+- An OpenAI API key is required for embeddings, query transformation,
+  generation, and verification.
+- The CrossEncoder downloads its Hugging Face model on first use.
+- A writable local directory is required for Chroma persistence.
+- Network access is required the first time external models or APIs are used.
+
+## Installation
+
+From the repository root, create and activate a virtual environment:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The application expects an OpenAI API key in the environment or a local `.env` file:
+Create a local `.env` file. Do not commit real credentials:
 
 ```text
-OPENAI_API_KEY=your-key
+OPENAI_API_KEY=your-openai-api-key
 ```
 
-LangSmith tracing is optional. If enabled by the local environment, the application can use the corresponding LangSmith variables such as `LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2`, and `LANGCHAIN_PROJECT`.
+Optional LangSmith tracing variables:
 
-The current source imports `langchain_community` and BM25 support. If those are not installed by the selected dependency set, install the missing packages before running the retrieval scripts:
-
-```powershell
-python -m pip install langchain-community rank-bm25
+```text
+LANGCHAIN_API_KEY=your-langsmith-api-key
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=research-agent
 ```
 
-## Indexing Documents
+The settings model reads `.env` from the working directory and supports these
+application variables:
 
-The Nexora indexing script loads, chunks, annotates, embeds, and persists the source document:
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENAI_MODEL` | `gpt-4o` | Chat model used for transformation, generation, verification, and regeneration |
+| `OPENAI_TIMEOUT` | `10` | Provider request timeout in seconds; must be positive |
+| `OPENAI_MAX_RETRIES` | `2` | Provider retry count; cannot be negative |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `VECTOR_DB_PATH` | `./data/chroma` | Chroma persistence directory |
+
+## Build the vector index
+
+Run the indexing script after adding or changing source documents:
 
 ```powershell
 python -m scripts.index_documents
 ```
 
-The current vector store path is `./data/chroma`. Re-indexing should be treated carefully because the project does not yet have a formal index versioning or reset workflow.
+The script currently indexes
+`data/documents/nexora_company_overview.md`. It:
 
-## Running Queries
+1. Loads the Markdown document.
+2. Splits it into overlapping chunks.
+3. Adds document and chunk metadata.
+4. Generates embeddings.
+5. Persists the chunks in the configured Chroma directory.
 
-Run the interactive query client:
+The query pipeline's BM25 source is currently fixed to the same Nexora Markdown
+file. Adding a document to the Chroma store alone does not automatically add it
+to BM25 retrieval.
+
+## Run the interactive client
 
 ```powershell
 python -m scripts.query
 ```
 
-The client accepts multiple questions in one process. Enter `exit` or `quit` to stop.
-
-Example questions for the current Nexora dataset:
+The client accepts multiple questions in one process. Enter `exit` or `quit` to
+stop. Example questions:
 
 ```text
 What is Nexora's monthly meal allowance?
 Does Nexora provide free lunch at its offices?
 ```
 
-Each query prints the transformed query, final reranked context, retrieval timings, answer status, verification details when applicable, and the local trace.
+The query workflow prints the transformed query, retrieved/reranked context,
+retrieval timings, generated answer, verification claims, decision, and local
+trace spans.
 
-## Development and Evaluation Commands
+## Run the API
 
-Useful focused commands include:
+```powershell
+python -m uvicorn main:app --reload
+```
+
+Useful local URLs:
+
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/health/live`
+- `http://127.0.0.1:8000/health/ready`
+- `http://127.0.0.1:8000/docs`
+
+Example PowerShell request:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/ask `
+  -ContentType "application/json" `
+  -Body '{"question":"What is Nexora''s monthly meal allowance?"}'
+```
+
+## Testing and evaluation
+
+Run the automated tests:
+
+```powershell
+python -m pytest tests
+```
+
+The API tests cover OpenAI timeout handling and validation of empty questions.
+The configuration tests cover positive timeout validation and non-negative
+retry-count validation.
+
+Focused experiment and evaluation commands include:
 
 ```powershell
 python -m scripts.test_hybrid
 python -m scripts.test_bm25
 python -m scripts.test_rrf
 python -m scripts.test_reranker
+python -m scripts.test_reranker_chroma
 python -m scripts.test_query_transformation
 python -m scripts.test_query_transformation_retrieval
 python -m scripts.test_structured_output
+python -m scripts.test_metadata_filter
+python -m scripts.test_parent_child
 python -m scripts.evaluate_retrieval
 python -m scripts.evaluate_reranker
+python -m scripts.evaluate_rag
+python -m scripts.run_evaluation
+```
+
+Some scripts require an existing Chroma index, an OpenAI key, network access,
+or a downloaded CrossEncoder model. They are experiments and are not all
+isolated unit tests.
+
+For a syntax-only check:
+
+```powershell
 python -m py_compile app/*.py scripts/*.py
 ```
 
-Some experiments require network access, an OpenAI key, a downloaded Hugging Face model, an existing Chroma index, or packages that are not available in every environment.
-
 ## Observability
 
-The pipeline has two complementary forms of observability:
+### Request logging
 
-### Retrieval timing
+The FastAPI middleware generates a UUID request ID for every request, stores it
+on `request.state`, adds it to request logs, and returns it as `X-Request-ID`.
+Failures are logged with their traceback before being handled by the API
+exception handlers.
 
-The query path measures:
+### Local pipeline spans
 
-- Dense retrieval
-- BM25 retrieval
-- RRF fusion
-- CrossEncoder reranking
-- Total retrieval through reranking
+`app/tracing.py` records spans for:
 
-The reranker separately measures CrossEncoder initialization and inference. This distinguishes a one-time model-loading cost from per-query scoring cost.
+- Retrieval
+- Generation
+- Verification
+- Regeneration
 
-### Trace spans
+The retrieval span records the candidate count and timing breakdown. Generation
+and verification spans record attempt numbers, claim counts, verdict counts, and
+available token-usage metadata.
 
-`app/tracing.py` records lightweight spans for retrieval, generation, verification, and regeneration. Generation spans include the attempt number and `answer_status`; verification spans include claim counts and verdict totals. Token usage extraction is implemented for provider responses that expose usage metadata, although structured generation responses may not expose the same metadata shape as raw LLM responses yet.
+### LangSmith
 
-## Evolution So Far
+The query transformation, generation, verification, regeneration, and complete
+RAG pipeline use LangChain traceable wrappers where configured. The API also
+places the request ID in the LangSmith tracing metadata context.
 
-### Stage 1: Basic RAG
+## Current limitations
 
-- Added Markdown loading and recursive chunking.
-- Added chunk metadata for source and stable chunk identification.
-- Added Chroma persistence and dense similarity retrieval.
-- Added a simple answer-generation path.
+The project is still an evolving research prototype. The following behaviors
+are intentionally not presented as production-ready:
 
-### Stage 2: Retrieval experiments
+1. BM25 is rebuilt on every question from one hard-coded Markdown source.
+2. The Chroma index has no formal version, migration, reset, or deletion
+   workflow.
+3. Indexing currently targets the Nexora Markdown file rather than discovering
+   all files in `data/documents`.
+4. The CrossEncoder is cached only in the current process; cold-start model
+   loading is still visible on the first query.
+5. The API performs the complete RAG workflow synchronously inside the request.
+6. The evaluation scripts are useful experiments, but the project does not yet
+   have a complete mocked end-to-end regression suite.
+7. Provider responses, malformed structured output, missing indexes, and model
+   loading failures need broader production-grade recovery and monitoring.
+8. Configuration covers core provider and storage settings, while retrieval
+   limits and model choices in parts of the pipeline remain code-level
+   constants.
+9. `WARN` is produced by the verification decision logic, but the public API
+   response model currently documents only `ACCEPT` and `REJECT`; this should be
+   aligned before relying on partially supported answers through the API.
 
-- Added MMR and metadata inspection experiments.
-- Added BM25 retrieval for lexical matching.
-- Added RRF to combine dense and lexical rankings.
-- Added hybrid retrieval while keeping the existing retriever APIs small.
+## Development direction
 
-### Stage 3: Query quality
+The next architectural improvements should focus on:
 
-- Added LLM-based query transformation before retrieval.
-- Added CrossEncoder reranking after retrieval.
-- Separated `RETRIEVAL_K = 5` from `CONTEXT_TOP_N = 3`.
-- Added printing of the final reranked evidence before generation.
-
-### Stage 4: Answer reliability
-
-- Added structured generation output with `ANSWERED` and `ABSTAINED` statuses.
-- Added explicit abstention instructions to prevent unsupported inference.
-- Added claim-level verification with supported, partially supported, and unsupported verdicts.
-- Added regeneration for rejected answered responses.
-- Ensured intentional abstentions are accepted without verification-driven regeneration.
-
-### Stage 5: Measurement and interaction
-
-- Added retrieval timing for dense search, BM25, RRF, reranking, and total retrieval.
-- Added separate CrossEncoder initialization and prediction timing.
-- Added a persistent interactive query loop for multiple questions per process.
-- Added local trace output for pipeline stages.
-
-## Current Limitations and Next Evolution
-
-The project is still an experiment, and several boundaries are intentionally visible:
-
-1. **BM25 lifecycle:** `create_bm25_retriever()` rereads and rebuilds BM25 from the Nexora source during each query. A production design should build BM25 during indexing and load a persisted or application-level retriever once.
-2. **Single-source configuration:** The hybrid retriever currently hard-codes the Nexora Markdown path. Source discovery and index manifests should replace this later.
-3. **Model lifecycle:** The CrossEncoder is cached only within the process. A service deployment should make model warm-up explicit and measure cold-start behavior separately.
-4. **Dependency declaration:** BM25 support imports `langchain_community` and its ranking backend; these should be made explicit in the dependency manifest if they are required for all environments.
-5. **Usage metadata:** Structured generation currently returns the validated Pydantic result, so token metadata may not be available through the same raw-response path used by verification.
-6. **Evaluation coverage:** The scripts provide experiments and recall checks, but a single automated end-to-end test suite with mocked providers is still needed.
-7. **Configuration:** `app/config.py` is currently empty. Model names, paths, retrieval limits, and feature flags should eventually move there.
-8. **Error handling:** Provider failures, missing indexes, invalid model responses, and partial tracing failures need explicit user-facing handling.
-9. **Index management:** There is no formal reset, migration, versioning, or document deletion workflow for the Chroma store.
-
-The recommended next architectural step is to separate indexing from query-time serving: ingest and chunk documents once, build both dense and BM25 indexes once, persist an index manifest, and make the query pipeline load those prepared resources rather than rebuilding them per request.
+1. Building dense and BM25 indexes once during ingestion.
+2. Persisting an index manifest with source files, chunking settings, embedding
+   model, and index version.
+3. Loading retrievers and models during application startup instead of rebuilding
+   them per request.
+4. Adding mocked provider tests for `ANSWERED`, `ABSTAINED`, `WARN`, `REJECT`,
+   regeneration, and provider failures.
+5. Moving retrieval limits, reranker settings, and feature flags into validated
+   application configuration.
+6. Adding explicit index reset, update, and document-removal commands.
+7. Aligning the API response contract with every decision that the pipeline can
+   produce.
