@@ -6,6 +6,9 @@ from fastapi import Request
 from typing import Literal
 from fastapi.responses import JSONResponse
 import logging
+from pathlib import Path
+
+from app.vector_store import VECTOR_DB_PATH
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -46,6 +49,26 @@ app = FastAPI(
     title="Research & Decision Intelligence Agent",
     version="0.1.0",
 )
+
+
+@app.get("/health/live")
+def health_live():
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    db_path = Path(VECTOR_DB_PATH)
+
+    if not db_path.is_dir():
+        raise HTTPException(
+            status_code=503,
+            detail="Vector store is not available.",
+        )
+
+    return {"status": "ready"}
+
+
 
 
 @app.middleware("http")
@@ -165,3 +188,4 @@ def ask(request: AskRequest, http_request: Request):
         answer_status=result["answer_status"],
         decision=result["decision"],
     )
+

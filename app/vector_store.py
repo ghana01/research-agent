@@ -1,8 +1,9 @@
 from langchain_chroma import Chroma
-
+from app.config import settings
 from app.llm import get_embeddings
 
-VECTOR_DB_PATH = "./data/chroma"
+
+VECTOR_DB_PATH = settings.vector_db_path
 
 def create_vector_store(documents):
     vector_store =Chroma.from_documents(
@@ -10,4 +11,4 @@ def create_vector_store(documents):
         documents=documents,
         embedding=get_embeddings())
 
-    return   vector_store
+    return   vector_store 
