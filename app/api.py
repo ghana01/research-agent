@@ -3,6 +3,7 @@ from fastapi import FastAPI ,HTTPException
 from pydantic import BaseModel, Field
 from langsmith import tracing_context
 from fastapi import Request
+from typing import Literal
 from fastapi.responses import JSONResponse
 import logging
 from openai import (
@@ -138,8 +139,8 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
-    answer_status: str
-    decision: str
+    answer_status: Literal["ANSWERED", "ABSTAINED"]
+    decision: Literal["ACCEPT", "REJECT"]
 
 
 @app.get("/")
